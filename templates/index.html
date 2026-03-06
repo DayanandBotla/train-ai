@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#0f1117">
-<title>AI Trade</title>
+<title>Train-AI</title>
 <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -48,9 +48,9 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:1
 .logo{display:flex;align-items:center;gap:8px}
 .logo-icon{
   width:30px;height:30px;
-  background:linear-gradient(135deg,var(--accent),#2563eb);
+  background:linear-gradient(135deg,var(--purple),#7c3aed);
   border-radius:8px;display:flex;align-items:center;justify-content:center;
-  box-shadow:0 0 16px rgba(59,130,246,.4);
+  box-shadow:0 0 16px rgba(139,92,246,.5);
 }
 .logo-icon svg{width:14px;height:14px;stroke:white;stroke-width:2.5;fill:none}
 .logo-text{font-size:15px;font-weight:800;letter-spacing:-.3px}
@@ -475,7 +475,7 @@ select.field-input{cursor:pointer;appearance:none;background-image:url("data:ima
     <div class="logo-icon">
       <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
     </div>
-    <div class="logo-text">Nifty<em>Edge</em></div>
+    <div class="logo-text">Train<em>-AI</em></div>
     <div class="logo-ver">v2</div>
   </div>
   <div class="topbar-right">
@@ -837,6 +837,7 @@ select.field-input{cursor:pointer;appearance:none;background-image:url("data:ima
         </div>
         <div class="sc-bar-wrap">
           <div style="font-size:9px;font-family:var(--mono);color:var(--text3);margin-bottom:4px" id="scoreLabel">Waiting for signal…</div>
+          <div style="font-size:9px;font-family:var(--mono);color:var(--purple);margin-top:4px" id="lotSizeLabel"></div>
           <div class="sc-bar"><div class="sc-bar-fill" id="scoreFill" style="width:0%;background:var(--text3)"></div></div>
         </div>
       </div>
@@ -949,7 +950,7 @@ select.field-input{cursor:pointer;appearance:none;background-image:url("data:ima
         <button class="btn btn-ghost" style="font-size:10px;padding:3px 8px;margin-left:auto" onclick="document.getElementById('alog').innerHTML=''">Clear</button>
       </div>
       <div class="alog" id="alog">
-        <div class="alog-item info"><div class="alog-t">INIT</div><div class="alog-m">AI Trade v2 loaded. 8-filter engine ready.</div></div>
+        <div class="alog-item info"><div class="alog-t">INIT</div><div class="alog-m">Train-AI v2 loaded. 8-filter engine ready.</div></div>
         <div class="alog-item warn"><div class="alog-t">INIT</div><div class="alog-m">Gap · VIX · Trend · 3-Candle filters active.</div></div>
       </div>
     </div>
@@ -1014,9 +1015,17 @@ function updateAI(d){
   const scoreFill=document.getElementById('scoreFill');
   scoreFill.style.width=sc+'%';
   scoreFill.style.background=scColor;
-  const scoreLabels={0:'Waiting…',30:'Weak setup',55:'Moderate',70:'Strong',85:'Very Strong'};
+  const scoreLabels={0:'Waiting…',30:'Weak — skip',55:'Moderate — 1 lot',65:'Good — 2 lots 🔥',75:'Strong — 3 lots 🔥🔥',85:'Max conviction — 4 lots 🔥🔥🔥'};
   const lk=Object.keys(scoreLabels).reverse().find(k=>sc>=k)||0;
   document.getElementById('scoreLabel').textContent=scoreLabels[lk];
+  // Dynamic lot display
+  const lotEl=document.getElementById('lotSizeLabel');
+  if(lotEl){
+    const lots=sc>=85?4:sc>=75?3:sc>=65?2:1;
+    const lotColor=lots>=4?'var(--green)':lots>=3?'#34d399':lots>=2?'var(--amber)':'var(--text3)';
+    lotEl.textContent=lots>=2?`AUTO LOTS: ${lots} × base`:'1 lot — wait for stronger setup';
+    lotEl.style.color=lotColor;
+  }
 
   // AI probabilities
   const prob=d.ai_prob||0.5; const probDn=d.ai_prob_down||0.5;
