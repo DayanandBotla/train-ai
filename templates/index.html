@@ -1015,16 +1015,14 @@ function updateAI(d){
   const scoreFill=document.getElementById('scoreFill');
   scoreFill.style.width=sc+'%';
   scoreFill.style.background=scColor;
-  const scoreLabels={0:'Waiting…',30:'Weak — skip',55:'Moderate — 1 lot',65:'Good — 2 lots 🔥',75:'Strong — 3 lots 🔥🔥',85:'Max conviction — 4 lots 🔥🔥🔥'};
+  const scoreLabels={0:'Waiting…',30:'Weak — AI blocking',55:'Moderate — watching',65:'✅ CONFIRMED — 2 lots entering',75:'✅ STRONG — 2 lots entering',85:'🔥 MAX conviction — 2 lots entering'};
   const lk=Object.keys(scoreLabels).reverse().find(k=>sc>=k)||0;
   document.getElementById('scoreLabel').textContent=scoreLabels[lk];
-  // Dynamic lot display
+  // Fixed 2-lot display
   const lotEl=document.getElementById('lotSizeLabel');
   if(lotEl){
-    const lots=sc>=85?4:sc>=75?3:sc>=65?2:1;
-    const lotColor=lots>=4?'var(--green)':lots>=3?'#34d399':lots>=2?'var(--amber)':'var(--text3)';
-    lotEl.textContent=lots>=2?`AUTO LOTS: ${lots} × base`:'1 lot — wait for stronger setup';
-    lotEl.style.color=lotColor;
+    lotEl.textContent=sc>=65?'2 LOTS FIXED 🔥 — testing phase':'Waiting for signal…';
+    lotEl.style.color=sc>=65?'var(--amber)':'var(--text3)';
   }
 
   // AI probabilities
@@ -1155,6 +1153,33 @@ setInterval(()=>{
             el.innerHTML='<div class="alog-t">'+a.time+'</div><div class="alog-m">'+a.msg+'</div>';
           });
         }
+      }
+    }
+    // Update 5m-OR status
+    if(d.or5_high) document.getElementById('or5High').textContent=d.or5_high.toFixed(1);
+    if(d.or5_low)  document.getElementById('or5Low').textContent=d.or5_low.toFixed(1);
+    document.getElementById('or5Signals').textContent=d.or5_signals||0;
+    document.getElementById('or5Blocked').textContent=d.or5_blocked||0;
+
+    // Update top bar status chips
+    const or15El=document.getElementById('or15Status');
+    const or5El=document.getElementById('or5Status');
+    if(or15El){
+      if(d.signal)       { or15El.textContent='ACTIVE 🔥'; or15El.style.color='var(--green)'; }
+      else if(d.or_high) { or15El.textContent='ready'; or15El.style.color='var(--amber)'; }
+      else               { or15El.textContent='waiting'; or15El.style.color='var(--text3)'; }
+    }
+    if(or5El){
+      if(d.or5_high)     { or5El.textContent='ready'; or5El.style.color='var(--amber)'; }
+      else               { or5El.textContent='waiting'; or5El.style.color='var(--text3)'; }
+      if(d.or5_sweep_dir){ or5El.textContent='SWEEP!'; or5El.style.color='var(--red)'; }
+    }
+    // Update P&L
+    if(typeof d.pnl !== 'undefined'){
+      const pnlEl=document.getElementById('pnlVal');
+      if(pnlEl){
+        pnlEl.textContent=(d.pnl>=0?'+':'')+Math.round(d.pnl);
+        pnlEl.style.color=d.pnl>=0?'var(--green)':'var(--red)';
       }
     }
   }).catch(()=>{});
