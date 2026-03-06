@@ -1,5 +1,5 @@
 """
-NiftyEdge Pro v2 — Combined Strategy Engine
+Train-AI — Intelligent Options Trading System
 Strategy 1: ORB Liquidity Sweep (8 filters)
 Strategy 2: AI XGBoost Confirmation (65% threshold)
 Logic: ORB signal fires FIRST → AI confirms → only then execute
@@ -386,16 +386,35 @@ def strategy_loop():
         time.sleep(3)
     add_alert("info","Engine stopped.")
 
+def dynamic_lots(score):
+    """
+    Quality-based lot sizing.
+    Only increase lots when AI + ORB agree strongly.
+    Score >= 85 → 4 lots (maximum conviction)
+    Score >= 75 → 3 lots (high conviction)
+    Score >= 65 → 2 lots (medium conviction)
+    Score <  65 → 1 lot  (minimum / skip)
+    Max lots capped at CONFIG["LOTS"] * 4
+    """
+    base = CONFIG["LOTS"]
+    if   score >= 85: lots = base * 4
+    elif score >= 75: lots = base * 3
+    elif score >= 65: lots = base * 2
+    else:             lots = base
+    return min(lots, 20)   # hard cap at 20 lots
+
 def _execute(sig,score=50):
     opt=get_atm_option(sig); ltp=opt["ltp"]
     if ltp<=0: add_alert("danger","LTP=0."); _rsweep(); return
-    boost=1.2 if score>=80 else 1.1 if score>=70 else 1.0
+    boost=1.3 if score>=85 else 1.2 if score>=75 else 1.1 if score>=65 else 1.0
     sl=round(ltp*(1-CONFIG["SL_PCT"]/100),2)
     tgt=round(ltp*(1+CONFIG["TGT_PCT"]*boost/100),2)
-    qty=CONFIG["LOTS"]*LOT.get(CONFIG["INDEX"],50)
+    lots=dynamic_lots(score)
+    qty=lots*LOT.get(CONFIG["INDEX"],50)
+    lot_label=f"{lots}L" + (" 🔥🔥🔥" if lots>=4 else " 🔥🔥" if lots>=3 else " 🔥" if lots>=2 else "")
     add_alert("success",
         f"✅ {sig} {opt['strike']} | E:₹{ltp} SL:₹{sl} T:₹{tgt} | "
-        f"Score:{score}/100 | {CONFIG['LOTS']}L | {CONFIG['MODE'].upper()}")
+        f"Score:{score}/100 | {lot_label} | {CONFIG['MODE'].upper()}")
     order=place_order(opt["security_id"],"BUY",qty)
     if order:
         feat=build_features(STATE["candles_15m"])
@@ -404,6 +423,7 @@ def _execute(sig,score=50):
             "signals_count":STATE["signals_count"]+1,
             "position":{"symbol":f"{CONFIG['INDEX']}{opt['strike']}{sig}",
                 "type":sig,"strike":opt["strike"],"qty":qty,
+                "lots":lots,
                 "entry":ltp,"sl":sl,"target":tgt,
                 "security_id":opt["security_id"],
                 "order_id":order.get("orderId","SIM"),
@@ -544,7 +564,7 @@ def health():
 # STARTUP
 # ════════════════════════════════════════════
 def startup():
-    print(f"\n{'='*50}\n  NiftyEdge Pro v2 | ORB + AI\n"
+    print(f"\n{'='*50}\n  Train-AI | ORB + AI Trading\n"
           f"  Client:{CONFIG['CLIENT_ID']} Mode:{CONFIG['MODE']}\n"
           f"  Token:{'SET ✅' if CONFIG['TOKEN'] else 'MISSING — sim mode'}\n"
           f"  AI:{ai.lib_type} Trained:{ai.is_ready}\n{'='*50}\n")
