@@ -70,6 +70,10 @@ STATE = {
     "gross_win":0.0,"gross_loss":0.0,"daily_loss":0.0,
     "signals_count":0,"blocked_count":0,"skipped_count":0,
     "ai_blocked":0,"ai_confirmed":0,
+    # 5-min OR engine
+    "or5_high":None,"or5_low":None,"or5_fetched":False,
+    "or5_sweep_dir":None,"or5_sweep_count":0,
+    "or5_signals":0,"or5_blocked":0,
 }
 
 # ════════════════════════════════════════════
@@ -158,6 +162,39 @@ def calc_or():
     if not cs: return False
     STATE["or_high"]=max(c["h"] for c in cs); STATE["or_low"]=min(c["l"] for c in cs)
     add_alert("success",f"OR — H:{STATE['or_high']} L:{STATE['or_low']} Rng:{round(STATE['or_high']-STATE['or_low'],1)}pts")
+    return True
+
+def fetch_5min_candles():
+    """Fetch today's 5-min candles from Dhan or simulate."""
+    if STATE["token_valid"]:
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            r = requests.post(f"{DHAN_API}/v2/charts/intraday", headers=hdrs(), timeout=5,
+                json={"securityId":SECID.get(CONFIG["INDEX"],"13"),
+                      "exchangeSegment":"IDX_I","instrument":"INDEX",
+                      "interval":"5","oi":False,"fromDate":today,"toDate":today})
+            if r.status_code == 200:
+                d = r.json(); ts = d.get("timestamp",[])
+                if ts:
+                    return [{"t":d["timestamp"][i],"o":d["open"][i],"h":d["high"][i],
+                             "l":d["low"][i],"c":d["close"][i],
+                             "v":d.get("volume",[0]*9999)[i]}
+                            for i in range(len(ts))]
+        except Exception as e:
+            add_alert("warn", f"5m candle fetch: {e}")
+    # Sim fallback
+    from ai_model import generate_sim_candles
+    return generate_sim_candles(30, STATE["nifty"] or 22350)
+
+def calc_or5():
+    """OR from first 5-min candle only (9:15-9:20)."""
+    candles = fetch_5min_candles()
+    if not candles: return False
+    first = candles[0]
+    STATE["or5_high"] = first["h"]
+    STATE["or5_low"]  = first["l"]
+    rng = round(STATE["or5_high"] - STATE["or5_low"], 2)
+    add_alert("info", f"5m-OR — H:{STATE['or5_high']} L:{STATE['or5_low']} Rng:{rng}pts")
     return True
 
 def nearest_expiry():
@@ -383,25 +420,136 @@ def strategy_loop():
                     _execute(orb_sig,sc)
                 elif STATE["sweep_candles"]>=3:
                     add_alert("warn","3C rule: no return. Void."); STATE["skipped_count"]+=1; _rsweep()
+        # ── 5-MIN OR ENGINE (parallel, 2 lots, AI≥68%) ──
+        if not STATE["or5_fetched"] and t >= dtime(9,20):
+            if calc_or5(): STATE["or5_fetched"] = True
+
+        if (STATE["or5_high"] and not STATE["signal"]
+                and not STATE["position"] and time_ok()):
+            _check_or5()
+
         time.sleep(3)
     add_alert("info","Engine stopped.")
 
 def dynamic_lots(score):
     """
-    Quality-based lot sizing.
-    Only increase lots when AI + ORB agree strongly.
-    Score >= 85 → 4 lots (maximum conviction)
-    Score >= 75 → 3 lots (high conviction)
-    Score >= 65 → 2 lots (medium conviction)
-    Score <  65 → 1 lot  (minimum / skip)
-    Max lots capped at CONFIG["LOTS"] * 4
+    Fixed 2-lot system — quality over size.
+    Score >= 65 → 2 lots (AI confirmed)
+    Score <  65 → blocked (never reaches here)
+    Hard cap: 2 lots maximum always.
     """
-    base = CONFIG["LOTS"]
-    if   score >= 85: lots = base * 4
-    elif score >= 75: lots = base * 3
-    elif score >= 65: lots = base * 2
-    else:             lots = base
-    return min(lots, 20)   # hard cap at 20 lots
+    return 2  # fixed — testing phase, never more than 2
+
+def _check_or5():
+    """
+    5-min OR sweep engine.
+    Runs parallel to 15-min engine.
+    Stricter: AI≥68%, SL20%, TGT60%, 2 lots only, window 9:20-10:00 AM only.
+    """
+    now = datetime.now().time()
+    # 5-min OR only valid 9:20–10:00 AM
+    if not (dtime(9,20) <= now <= dtime(10,0)):
+        return
+
+    price = STATE["nifty"] or 0
+    if not price or not STATE["or5_high"]: return
+
+    or5h = STATE["or5_high"]
+    or5l = STATE["or5_low"]
+
+    # Detect sweep
+    if price > or5h and STATE["or5_sweep_dir"] != "UP":
+        STATE["or5_sweep_dir"]   = "UP"
+        STATE["or5_sweep_count"] = 0
+        add_alert("warn", f"⚡ 5m SWEEP UP {price:.0f} > {or5h:.0f}")
+
+    elif price < or5l and STATE["or5_sweep_dir"] != "DOWN":
+        STATE["or5_sweep_dir"]   = "DOWN"
+        STATE["or5_sweep_count"] = 0
+        add_alert("warn", f"⚡ 5m SWEEP DOWN {price:.0f} < {or5l:.0f}")
+
+    if STATE["or5_sweep_dir"]:
+        STATE["or5_sweep_count"] += 1
+
+        returned = (
+            (STATE["or5_sweep_dir"] == "UP"   and or5l < price < or5h) or
+            (STATE["or5_sweep_dir"] == "DOWN" and or5l < price < or5h)
+        )
+
+        if returned and STATE["or5_sweep_count"] <= 6:
+            sig = "PE" if STATE["or5_sweep_dir"] == "UP" else "CE"
+
+            # Stricter AI gate for 5-min: ≥68%
+            run_ai_prediction()
+            ai_ok, ai_sc, ai_reason = ai_approves(sig)
+            target_prob = STATE["ai_prob"] if sig=="CE" else STATE["ai_prob_down"]
+
+            if target_prob < 0.68:
+                STATE["or5_blocked"] += 1
+                add_alert("block",
+                    f"🤖 5m AI blocked {sig} — prob:{target_prob:.0%} < 68%")
+                _reset_or5(); return
+
+            if not trend_ok(sig):
+                STATE["or5_blocked"] += 1
+                add_alert("block", f"5m trend filter blocked {sig}")
+                _reset_or5(); return
+
+            sc = signal_score(sig, target_prob, True)
+            add_alert("success",
+                f"5m-OR SIGNAL {sig} | AI:{target_prob:.0%} | Score:{sc}/100")
+            _execute_or5(sig, sc)
+
+        elif STATE["or5_sweep_count"] > 6:
+            add_alert("warn", "5m: no return in 6 candles. Void.")
+            _reset_or5()
+
+def _reset_or5():
+    STATE["or5_sweep_dir"]   = None
+    STATE["or5_sweep_count"] = 0
+
+def _execute_or5(sig, score=60):
+    """Execute 5-min OR trade — fixed 2 lots, SL20%, TGT60%."""
+    opt = get_atm_option(sig)
+    ltp = opt["ltp"]
+    if ltp <= 0:
+        add_alert("danger","5m: LTP=0."); _reset_or5(); return
+
+    sl  = round(ltp * 0.80, 2)   # SL 20%
+    tgt = round(ltp * 1.60, 2)   # TGT 60%
+    qty = 2 * LOT.get(CONFIG["INDEX"], 50)   # always 2 lots
+
+    add_alert("success",
+        f"✅ 5m {sig} {opt['strike']} | E:₹{ltp} SL:₹{sl} T:₹{tgt} | "
+        f"2L | Score:{score}/100 | {CONFIG['MODE'].upper()}")
+
+    order = place_order(opt["security_id"], "BUY", qty)
+    if order:
+        feat = build_features(STATE["candles_15m"])
+        STATE["or5_signals"] += 1
+        STATE.update({
+            "signal":sig, "entry_price":ltp, "sl_price":sl,
+            "target_price":tgt, "trail_high":ltp,
+            "signals_count": STATE["signals_count"]+1,
+            "position":{
+                "symbol":   f"{CONFIG['INDEX']}{opt['strike']}{sig}",
+                "type":     sig,
+                "strike":   opt["strike"],
+                "qty":      qty,
+                "lots":     2,
+                "entry":    ltp,
+                "sl":       sl,
+                "target":   tgt,
+                "security_id": opt["security_id"],
+                "order_id": order.get("orderId","SIM"),
+                "entry_time": datetime.now().strftime("%H:%M"),
+                "score":    score,
+                "ai_prob":  STATE["ai_prob"],
+                "source":   "5m-OR",
+                "feature_vector": feat["vector"] if feat else [],
+            }
+        })
+        _reset_or5()
 
 def _execute(sig,score=50):
     opt=get_atm_option(sig); ltp=opt["ltp"]
@@ -411,7 +559,7 @@ def _execute(sig,score=50):
     tgt=round(ltp*(1+CONFIG["TGT_PCT"]*boost/100),2)
     lots=dynamic_lots(score)
     qty=lots*LOT.get(CONFIG["INDEX"],50)
-    lot_label=f"{lots}L" + (" 🔥🔥🔥" if lots>=4 else " 🔥🔥" if lots>=3 else " 🔥" if lots>=2 else "")
+    lot_label=f"{lots}L 🔥"  # fixed 2-lot mode
     add_alert("success",
         f"✅ {sig} {opt['strike']} | E:₹{ltp} SL:₹{sl} T:₹{tgt} | "
         f"Score:{score}/100 | {lot_label} | {CONFIG['MODE'].upper()}")
@@ -507,6 +655,9 @@ def get_state():
         "signals_count":STATE["signals_count"],"blocked_count":STATE["blocked_count"],
         "skipped_count":STATE["skipped_count"],
         "filters":{"gap":gap_ok(),"gap_pct":gap,"vix":vix_ok(),"time":time_ok(),"limit":limit_ok()},
+        "or5_high":STATE["or5_high"],"or5_low":STATE["or5_low"],
+        "or5_sweep_dir":STATE["or5_sweep_dir"],
+        "or5_signals":STATE["or5_signals"],"or5_blocked":STATE["or5_blocked"],
         "alerts":STATE["alerts"][:20],
         "config":{"client_id":CONFIG["CLIENT_ID"],"mode":CONFIG["MODE"],"index":CONFIG["INDEX"],
                   "lots":CONFIG["LOTS"],"capital":CONFIG["CAPITAL"],"risk_pct":CONFIG["RISK_PCT"],
@@ -551,8 +702,11 @@ def reset():
     for k in ["trades","alerts","ai_prediction_history"]: STATE[k]=[]
     for k in ["gross_win","gross_loss","daily_loss","signals_count","blocked_count",
               "skipped_count","ai_blocked","ai_confirmed","entry_price","signal_score"]: STATE[k]=0
-    for k in ["or_high","or_low","sweep_dir","signal","orb_signal","position"]: STATE[k]=None
+    for k in ["or_high","or_low","sweep_dir","signal","orb_signal","position",
+              "or5_high","or5_low","or5_sweep_dir"]: STATE[k]=None
     STATE["or_fetched"]=False; STATE["sweep_candles"]=0
+    STATE["or5_fetched"]=False; STATE["or5_sweep_count"]=0
+    STATE["or5_signals"]=0; STATE["or5_blocked"]=0
     add_alert("info","Session reset."); return jsonify({"status":"reset"})
 
 @app.route("/api/health")
