@@ -12,6 +12,110 @@ from flask_cors import CORS
 from ai_model import ai, generate_sim_candles
 from feature_engine import build_features
 
+# ════════════════════════════════════════════
+# PERSISTENCE — survive restarts & token updates
+# ════════════════════════════════════════════
+SESSION_FILE = lambda: f"session_{datetime.now().strftime('%Y-%m-%d')}.json"
+TRADES_FILE  = lambda: f"trades_{datetime.now().strftime('%Y-%m-%d')}.json"
+
+def save_session():
+    """Save critical state to disk. Called after every trade/alert."""
+    try:
+        data = {
+            "date":         datetime.now().strftime("%Y-%m-%d"),
+            "gross_win":    STATE["gross_win"],
+            "gross_loss":   STATE["gross_loss"],
+            "daily_loss":   STATE["daily_loss"],
+            "signals_count":STATE["signals_count"],
+            "blocked_count":STATE["blocked_count"],
+            "skipped_count":STATE["skipped_count"],
+            "ai_blocked":   STATE["ai_blocked"],
+            "ai_confirmed": STATE["ai_confirmed"],
+            "or5_signals":  STATE["or5_signals"],
+            "or5_blocked":  STATE["or5_blocked"],
+            "or_high":      STATE["or_high"],
+            "or_low":       STATE["or_low"],
+            "or5_high":     STATE["or5_high"],
+            "or5_low":      STATE["or5_low"],
+            "alerts":       STATE["alerts"][:40],
+            "position":     STATE["position"],
+            "signal":       STATE["signal"],
+            "entry_price":  STATE["entry_price"],
+            "sl_price":     STATE["sl_price"],
+            "target_price": STATE["target_price"],
+            "saved_at":     datetime.now().strftime("%H:%M:%S"),
+        }
+        with open(SESSION_FILE(), "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[PERSIST] Save session failed: {e}")
+
+def save_trade(trade):
+    """Append trade to today's trade log."""
+    try:
+        trades = []
+        tf = TRADES_FILE()
+        if os.path.exists(tf):
+            with open(tf) as f:
+                trades = json.load(f)
+        trades.append(trade)
+        with open(tf, "w") as f:
+            json.dump(trades, f, indent=2)
+    except Exception as e:
+        print(f"[PERSIST] Save trade failed: {e}")
+
+def load_session():
+    """
+    On startup: restore today's session if it exists.
+    This means token refresh / server restart = no data loss.
+    """
+    try:
+        sf = SESSION_FILE()
+        tf = TRADES_FILE()
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        if os.path.exists(sf):
+            with open(sf) as f:
+                data = json.load(f)
+            # Only restore if it's today's session
+            if data.get("date") == today:
+                STATE["gross_win"]    = data.get("gross_win", 0)
+                STATE["gross_loss"]   = data.get("gross_loss", 0)
+                STATE["daily_loss"]   = data.get("daily_loss", 0)
+                STATE["signals_count"]= data.get("signals_count", 0)
+                STATE["blocked_count"]= data.get("blocked_count", 0)
+                STATE["skipped_count"]= data.get("skipped_count", 0)
+                STATE["ai_blocked"]   = data.get("ai_blocked", 0)
+                STATE["ai_confirmed"] = data.get("ai_confirmed", 0)
+                STATE["or5_signals"]  = data.get("or5_signals", 0)
+                STATE["or5_blocked"]  = data.get("or5_blocked", 0)
+                STATE["or_high"]      = data.get("or_high")
+                STATE["or_low"]       = data.get("or_low")
+                STATE["or5_high"]     = data.get("or5_high")
+                STATE["or5_low"]      = data.get("or5_low")
+                STATE["alerts"]       = data.get("alerts", [])
+                # Restore open position if any
+                pos = data.get("position")
+                if pos:
+                    STATE["position"]     = pos
+                    STATE["signal"]       = data.get("signal")
+                    STATE["entry_price"]  = data.get("entry_price", 0)
+                    STATE["sl_price"]     = data.get("sl_price", 0)
+                    STATE["target_price"] = data.get("target_price", 0)
+                # Restore OR calculated flags
+                if STATE["or_high"]:  STATE["or_fetched"]  = True
+                if STATE["or5_high"]: STATE["or5_fetched"] = True
+                print(f"[PERSIST] ✅ Session restored — P&L: ₹{STATE['gross_win']-STATE['gross_loss']:.0f} | Signals: {STATE['signals_count']}")
+                add_alert("success", f"Session restored from disk — P&L: ₹{STATE['gross_win']-STATE['gross_loss']:.0f}")
+
+        if os.path.exists(tf):
+            with open(tf) as f:
+                STATE["trades"] = json.load(f)
+            print(f"[PERSIST] ✅ {len(STATE['trades'])} trades restored from disk.")
+
+    except Exception as e:
+        print(f"[PERSIST] Load failed (starting fresh): {e}")
+
 try:
     import websocket
     WS_OK = True
@@ -602,13 +706,17 @@ def _close(exit_px,reason):
     place_order(pos["security_id"],"SELL",pos["qty"])
     pnl=round((exit_px-pos["entry"])*pos["qty"],2)
     if pos.get("feature_vector"): ai.record_trade_outcome(pos["feature_vector"],1 if pnl>0 else 0,pnl)
-    STATE["trades"].insert(0,{"time":pos["entry_time"],"exit_time":datetime.now().strftime("%H:%M"),
+    trade_record = {"time":pos["entry_time"],"exit_time":datetime.now().strftime("%H:%M"),
         "type":pos["type"],"strike":pos["strike"],"entry":pos["entry"],"exit":exit_px,
-        "lots":CONFIG["LOTS"],"pnl":pnl,"reason":reason,"mode":CONFIG["MODE"],
-        "score":pos.get("score",0),"ai_prob":pos.get("ai_prob",0)})
+        "lots":pos.get("lots",2),"pnl":pnl,"reason":reason,"mode":CONFIG["MODE"],
+        "score":pos.get("score",0),"ai_prob":pos.get("ai_prob",0),
+        "source":pos.get("source","15m-OR")}
+    STATE["trades"].insert(0, trade_record)
     STATE["trades"]=STATE["trades"][:50]
+    save_trade(trade_record)   # persist immediately to disk
     if pnl>=0: STATE["gross_win"]+=pnl
     else: STATE["gross_loss"]+=abs(pnl); STATE["daily_loss"]+=abs(pnl)
+    save_session()   # save after every trade close
     add_alert("success" if pnl>=0 else "danger",f"{reason} | ₹{exit_px} | P&L:{'+' if pnl>=0 else ''}₹{pnl}")
     STATE.update({"position":None,"signal":None,"orb_signal":None,"entry_price":0})
 
@@ -620,6 +728,9 @@ def _rsweep(): STATE["sweep_dir"]=None; STATE["sweep_candles"]=0
 def add_alert(level,msg):
     STATE["alerts"].insert(0,{"time":datetime.now().strftime("%H:%M:%S"),"level":level,"msg":msg})
     STATE["alerts"]=STATE["alerts"][:40]; print(f"[{level.upper()}] {msg}")
+    # Save to disk every 5 alerts (avoid write thrash)
+    if len(STATE["alerts"]) % 5 == 0:
+        save_session()
 
 # ════════════════════════════════════════════
 # ROUTES
@@ -714,6 +825,32 @@ def health():
     return jsonify({"status":"ok","ws":STATE["ws_connected"],"token":STATE["token_valid"],
                     "nifty":STATE["nifty"],"ai_trained":STATE["ai_trained"],"mode":CONFIG["MODE"]})
 
+@app.route("/api/session/export")
+def export_session():
+    """Download today's full trade log as JSON."""
+    tf = TRADES_FILE()
+    trades = []
+    if os.path.exists(tf):
+        with open(tf) as f: trades = json.load(f)
+    return jsonify({
+        "date":    datetime.now().strftime("%Y-%m-%d"),
+        "trades":  trades,
+        "summary": {
+            "total_trades":  len(trades),
+            "wins":          sum(1 for t in trades if t.get("pnl",0)>0),
+            "losses":        sum(1 for t in trades if t.get("pnl",0)<=0),
+            "gross_win":     round(sum(t.get("pnl",0) for t in trades if t.get("pnl",0)>0),2),
+            "gross_loss":    round(sum(t.get("pnl",0) for t in trades if t.get("pnl",0)<=0),2),
+            "net_pnl":       round(sum(t.get("pnl",0) for t in trades),2),
+        }
+    })
+
+@app.route("/api/session/save", methods=["POST"])
+def force_save():
+    """Manually trigger session save."""
+    save_session()
+    return jsonify({"status":"saved","time":datetime.now().strftime("%H:%M:%S")})
+
 # ════════════════════════════════════════════
 # STARTUP
 # ════════════════════════════════════════════
@@ -727,6 +864,9 @@ def startup():
     else:
         STATE["nifty"]=22350.0; STATE["nifty_prev"]=22250.0
         add_alert("warn","No token — simulation mode.")
+    # Restore today's session from disk (survives token refresh/restart)
+    load_session()
+
     if not ai.is_ready:
         add_alert("info","First run — training AI…"); retrain_ai()
     def _daily():
